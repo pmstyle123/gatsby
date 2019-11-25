@@ -248,7 +248,11 @@ export function unknownFragmentError({ fragmentNames, filePath, def, node }) {
   }
 }
 
-export function duplicateFragmentError({ name, leftDefinition, rightDefinition }) {
+export function duplicateFragmentError({
+  name,
+  leftDefinition,
+  rightDefinition,
+}) {
   return {
     id: `85919`,
     context: {
