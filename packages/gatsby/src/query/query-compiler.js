@@ -195,37 +195,49 @@ const extractOperations = (schema, parsedQueries, addError, parentSpan) => {
   const definitionsByName = new Map()
   const operations = []
 
-  for (const [filePath, doc] of parsedQueries.entries()) {
+  for (const {
+    filePath,
+    text,
+    templateLoc,
+    hash,
+    doc,
+    isHook,
+    isStaticQuery,
+  } of parsedQueries) {
     const errors = validate(schema, doc, preValidationRules)
 
     if (errors && errors.length) {
       addError(
         ...errors.map(error => {
           const location = {
-            start: locInGraphQlToLocInFile(
-              doc.definitions[0].templateLoc,
-              error.locations[0]
-            ),
+            start: locInGraphQlToLocInFile(templateLoc, error.locations[0]),
           }
           return errorParser({ message: error.message, filePath, location })
         })
       )
 
-      actions.queryExtractionGraphQLError({
-        componentPath: filePath,
-      })
+      store.dispatch(
+        actions.queryExtractionGraphQLError({
+          componentPath: filePath,
+        })
+      )
+      // Something is super wrong with this document, so we report it and skip
       continue
     }
 
     doc.definitions.forEach((def: any) => {
-      const name: string = def.name.value
-      const text = print(def)
+      const name = def.name.value
+      let printedAst = null
       if (def.kind === Kind.OPERATION_DEFINITION) {
         operations.push(def)
       } else if (def.kind === Kind.FRAGMENT_DEFINITION) {
+        // Check if we already registered a fragment with this name
+        printedAst = print(def)
         if (definitionsByName.has(name)) {
           const otherDef = definitionsByName.get(name)
-          if (text !== otherDef.text) {
+          // If it's not an accidental duplicate fragment, but is a different
+          // one - we report an error
+          if (printedAst !== otherDef.printedAst) {
             addError(
               duplicateFragmentError({
                 name,
@@ -233,6 +245,7 @@ const extractOperations = (schema, parsedQueries, addError, parentSpan) => {
                   def,
                   filePath,
                   text,
+                  templateLoc,
                 },
                 rightDefinition: otherDef,
               })
@@ -242,14 +255,22 @@ const extractOperations = (schema, parsedQueries, addError, parentSpan) => {
           return
         }
       }
+
       definitionsByName.set(name, {
+        name,
         def,
         filePath,
-        text,
+        text: text,
+        templateLoc,
+        printedAst,
+        isHook,
+        isStaticQuery,
         isFragment: def.kind === Kind.FRAGMENT_DEFINITION,
+        hash: hash,
       })
     })
   }
+
   return {
     definitionsByName,
     operations,
@@ -265,7 +286,7 @@ const processDefinitions = ({
 }) => {
   const processedQueries: Queries = new Map()
 
-  const usedFragmentsForFragment = new Map()
+  const fragmentsUsedByFragment = new Map()
 
   const fragmentNames = Array.from(definitionsByName.entries())
     .filter(([_, def]) => def.isFragment)
@@ -286,47 +307,39 @@ const processDefinitions = ({
         )
       )
 
-      actions.queryExtractionGraphQLError({
-        componentPath: filePath,
-      })
+      store.dispatch(
+        actions.queryExtractionGraphQLError({
+          componentPath: filePath,
+        })
+      )
       continue
     }
 
-    const usedFragments = new Set()
-    const stack = [operation]
-    let missingFragment = false
-    while (stack.length > 0) {
-      const def = stack.pop(operation)
-      visit(def, {
-        [Kind.FRAGMENT_SPREAD]: node => {
-          const name = node.name.value
-          if (usedFragmentsForFragment.has(name)) {
-            usedFragmentsForFragment.get(name).forEach(derivedFragmentName => {
-              usedFragments.add(derivedFragmentName)
-            })
-            usedFragments.add(name)
-          } else if (definitionsByName.has(name)) {
-            stack.push(definitionsByName.get(name).def)
-            usedFragments.add(name)
-          } else {
-            missingFragment = true
-            actions.queryExtractionGraphQLError({
-              componentPath: filePath,
-            })
-            addError(
-              unknownFragmentError({
-                fragmentNames,
-                filePath,
-                def,
-                node,
-              })
-            )
-          }
-        },
-      })
-    }
+    const {
+      usedFragments,
+      missingFragments,
+    } = determineUsedFragmentsForDefinition(
+      originalDefinition,
+      definitionsByName,
+      fragmentsUsedByFragment
+    )
 
-    if (missingFragment) {
+    if (missingFragments.length > 0) {
+      for (const { filePath, definition, node } of missingFragments) {
+        store.dispatch(
+          actions.queryExtractionGraphQLError({
+            componentPath: filePath,
+          })
+        )
+        addError(
+          unknownFragmentError({
+            fragmentNames,
+            filePath,
+            definition,
+            node,
+          })
+        )
+      }
       continue
     }
 
@@ -346,14 +359,16 @@ const processDefinitions = ({
         )
 
         const filePath = originalDefinition.filePath
-        actions.queryExtractionGraphQLError({
-          componentPath: filePath,
-          error: formattedMessage,
-        })
+        store.dispatch(
+          actions.queryExtractionGraphQLError({
+            componentPath: filePath,
+            error: formattedMessage,
+          })
+        )
         addError(
           errorParser({
             location: locInGraphQlToLocInFile(
-              operation.templateLoc,
+              originalDefinition.templateLoc,
               error.locations[0]
             ),
             message,
@@ -367,11 +382,11 @@ const processDefinitions = ({
     const query = {
       name,
       text: print(document),
-      originalText: originalDefinition.def.text,
+      originalText: originalDefinition.text,
       path: filePath,
-      isHook: originalDefinition.def.isHook,
-      isStaticQuery: originalDefinition.def.isStaticQuery,
-      hash: originalDefinition.def.hash,
+      isHook: originalDefinition.isHook,
+      isStaticQuery: originalDefinition.isStaticQuery,
+      hash: originalDefinition.hash,
     }
 
     if (query.isStaticQuery) {
@@ -397,4 +412,50 @@ const processDefinitions = ({
   }
 
   return processedQueries
+}
+
+const determineUsedFragmentsForDefinition = (
+  definition,
+  definitionsByName,
+  fragmentsUsedByFragment
+) => {
+  const { def, name, isFragment, filePath } = definition
+  const cachedUsedFragments = fragmentsUsedByFragment.get(name)
+  if (cachedUsedFragments) {
+    return { usedFragments: cachedUsedFragments, missingFragments: [] }
+  } else {
+    const usedFragments = new Set()
+    const missingFragments = []
+    visit(def, {
+      [Kind.FRAGMENT_SPREAD]: node => {
+        const name = node.name.value
+        const fragmentDefinition = definitionsByName.get(name)
+        if (fragmentDefinition) {
+          usedFragments.add(name)
+          const {
+            usedFragments: usedFragmentsForFragment,
+            missingFragments: missingFragmentsForFragment,
+          } = determineUsedFragmentsForDefinition(
+            fragmentDefinition,
+            definitionsByName,
+            fragmentsUsedByFragment
+          )
+          usedFragmentsForFragment.forEach(fragmentName =>
+            usedFragments.add(fragmentName)
+          )
+          missingFragments.push(...missingFragmentsForFragment)
+        } else {
+          missingFragments.push({
+            filePath,
+            definition,
+            node,
+          })
+        }
+      },
+    })
+    if (isFragment) {
+      fragmentsUsedByFragment.set(name, usedFragments)
+    }
+    return { usedFragments, missingFragments }
+  }
 }

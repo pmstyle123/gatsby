@@ -5,6 +5,7 @@ import { codeFrameColumns } from "@babel/code-frame"
 const levenshtein = require(`fast-levenshtein`)
 import _ from "lodash"
 import report from "gatsby-cli/lib/reporter"
+const { locInGraphQlToLocInFile } = require(`./error-parser`)
 
 type RelayGraphQLError = Error & { validationErrors?: Object }
 
@@ -218,7 +219,12 @@ export function graphqlError(
   return { formattedMessage: reportedMessage, docName, message, codeBlock }
 }
 
-export function unknownFragmentError({ fragmentNames, filePath, def, node }) {
+export function unknownFragmentError({
+  fragmentNames,
+  filePath,
+  definition,
+  node,
+}) {
   const name = node.name.value
   const closestFragment = fragmentNames
     .map(f => {
@@ -234,10 +240,16 @@ export function unknownFragmentError({ fragmentNames, filePath, def, node }) {
       fragmentName: name,
       closestFragment,
       codeFrame: codeFrameColumns(
-        def.text,
+        definition.text,
         {
-          start: getLocation({ body: def.text }, node.loc.start),
-          end: getLocation({ body: def.text }, node.loc.end),
+          start: locInGraphQlToLocInFile(
+            definition.templateLoc,
+            getLocation({ body: definition.text }, node.loc.start)
+          ),
+          end: locInGraphQlToLocInFile(
+            definition.templateLoc,
+            getLocation({ body: definition.text }, node.loc.end)
+          ),
         },
         {
           linesAbove: 10,
@@ -278,7 +290,7 @@ export function duplicateFragmentError({
         ),
       },
       rightFragment: {
-        filepath: rightDefinition.filePath,
+        filePath: rightDefinition.filePath,
         codeFrame: codeFrameColumns(
           rightDefinition.text,
           {

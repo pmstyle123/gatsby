@@ -138,10 +138,10 @@ const errorMap = {
       Found two different GraphQL fragments with identical name "${context.fragmentName}". Fragment names must be unique
 
       File: ${context.leftFragment.filePath}
-      {context.leftFragment.codeFrame}
+      ${context.leftFragment.codeFrame}
 
       File: ${context.rightFragment.filePath}
-      {context.rightFragment.codeFrame}
+      ${context.rightFragment.codeFrame}
     `),
     type: `GRAPHQL`,
     level: `ERROR`,
