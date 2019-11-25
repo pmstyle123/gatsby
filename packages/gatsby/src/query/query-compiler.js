@@ -228,6 +228,7 @@ const extractOperations = (schema, parsedQueries, addError, parentSpan) => {
           if (text !== otherDef.text) {
             addError(
               duplicateFragmentError({
+                name,
                 leftDefinition: {
                   def,
                   filePath,

@@ -981,7 +981,7 @@ describe(`actual compiling`, () => {
       Array [
         Object {
           "context": Object {
-            "fragmentName": "",
+            "fragmentName": "PostsJsonFragment",
             "leftFragment": Object {
               "codeFrame": "> 1 | fragment PostsJsonFragment on PostsJson {
           |          ^^^^^^^^^^^^^^^^^
